@@ -1,0 +1,19 @@
+[project]
+name = "handy-py-tools"
+version = "0.1.0"
+description = "A growing collection of practical Python tools."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ezdxf>=1.3",
+    "PySide6>=6.7",
+    "svgpathtools>=1.6",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[tool.uv]
+package = false
