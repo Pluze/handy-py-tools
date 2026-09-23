@@ -7,12 +7,13 @@ from pathlib import Path
 import sys
 import time
 
-from PySide6.QtCore import QObject, QPointF, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QPointF, QRectF, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QPainter, QPainterPath, QPen
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QGraphicsItem,
     QGraphicsScene,
     QGraphicsView,
     QGridLayout,
@@ -29,6 +30,31 @@ from PySide6.QtWidgets import (
 )
 
 from converter import ConversionPreview, SvgToDxfConverter, relative_error_for_slider
+
+
+class EndpointItem(QGraphicsItem):
+    """Draw fitted segment endpoints with a constant on-screen size."""
+
+    def __init__(self, points: list[QPointF]) -> None:
+        super().__init__()
+        self.points = points
+        xs = [point.x() for point in points]
+        ys = [point.y() for point in points]
+        self.bounds = QRectF(
+            min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+        ).adjusted(-3.0, -3.0, 3.0, 3.0)
+        self.setZValue(2.0)
+
+    def boundingRect(self) -> QRectF:
+        return self.bounds
+
+    def paint(self, painter: QPainter, _option, _widget=None) -> None:
+        pen = QPen(QColor("#ffcf66"))
+        pen.setWidthF(4.0)
+        pen.setCosmetic(True)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPoints(self.points)
 
 
 class PreviewView(QGraphicsView):
@@ -62,12 +88,14 @@ class PreviewView(QGraphicsView):
         pen = QPen(QColor("#28d7ff"))
         pen.setWidthF(2.0)
         pen.setCosmetic(True)
+        endpoints: list[QPointF] = []
         for chain in preview.chains:
             if not chain.primitives:
                 continue
             first = chain.primitives[0].start
             path = QPainterPath(QPointF(first[0], -first[1]))
             for primitive in chain.primitives:
+                endpoints.append(QPointF(primitive.start[0], -primitive.start[1]))
                 if primitive.kind == "line" or primitive.center is None:
                     path.lineTo(primitive.end[0], -primitive.end[1])
                     continue
@@ -83,6 +111,9 @@ class PreviewView(QGraphicsView):
                     path.lineTo(x, -y)
             if chain.closed:
                 path.closeSubpath()
+            else:
+                last = chain.primitives[-1].end
+                endpoints.append(QPointF(last[0], -last[1]))
             scene.addPath(path, pen)
 
         for center, radius in preview.circles:
@@ -93,6 +124,8 @@ class PreviewView(QGraphicsView):
                 radius * 2.0,
                 pen,
             )
+        if endpoints:
+            scene.addItem(EndpointItem(endpoints))
 
         bounds = scene.itemsBoundingRect()
         margin = max(bounds.width(), bounds.height()) * 0.04
@@ -214,10 +247,10 @@ class MainWindow(QMainWindow):
 
         explanation = QLabel(
             "The logarithmic slider sets the maximum local fitting error from "
-            "0.001% to 50% of each curved feature's size. Coarser settings "
-            "favor valid straight fits. Native straight lines remain exact. "
-            "The preview overlays fitted DXF geometry in cyan on "
-            "the source SVG."
+            "0.001% to 50% of each curved feature's size. Fitting minimizes "
+            "polyline vertices within that limit, then prefers lower error. "
+            "Native straight lines remain exact. The preview overlays fitted "
+            "DXF geometry in cyan and its endpoints in amber on the source SVG."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
@@ -354,8 +387,11 @@ class MainWindow(QMainWindow):
             f"Local tolerance: {result.minimum_tolerance:.6g} to "
             f"{result.maximum_tolerance:.6g} coordinate units | "
             f"Observed relative error: {result.observed_relative_error_percent:.4g}% | "
-            f"{result.circles} circles, {result.arcs} arcs, {result.lines} lines, "
-            f"{result.vertices} vertices | {elapsed * 1000.0:.0f} ms"
+            f"{result.vertices} polyline vertices | "
+            f"{result.circles + result.polylines} DXF entities "
+            f"({result.circles} circles, {result.polylines} polylines), "
+            f"{result.arcs} arc segments, {result.lines} line segments, "
+            f"{elapsed * 1000.0:.0f} ms"
         )
 
     def _convert(self) -> None:

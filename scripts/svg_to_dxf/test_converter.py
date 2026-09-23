@@ -6,7 +6,6 @@ import unittest
 
 from converter import (
     SvgToDxfConverter,
-    line_preference_for_error,
     local_curve_tolerance,
     minimum_primitives,
     relative_error_for_slider,
@@ -54,16 +53,44 @@ class LocalToleranceTests(unittest.TestCase):
         self.assertAlmostEqual(relative_error_for_slider(50), 50000.0 ** 0.5 * 1e-5)
         self.assertAlmostEqual(relative_error_for_slider(100), 0.5)
 
-    def test_coarse_error_favors_valid_line_over_more_exact_arc(self) -> None:
+    def test_equal_segment_count_favors_more_exact_arc(self) -> None:
         points = [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)]
         precise = minimum_primitives(points, 1.0)
-        coarse = minimum_primitives(
-            points, 1.0, line_preference_for_error(0.5)
-        )
 
         self.assertEqual([item.kind for item in precise], ["arc"])
-        self.assertEqual([item.kind for item in coarse], ["line"])
-        self.assertEqual(coarse[0].error, 1.0)
+        self.assertAlmostEqual(precise[0].error, 0.0)
+
+    def test_adjacent_svg_curves_fit_as_one_arc(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<path d="M 10 0 A 10 10 0 0 1 0 10 '
+            'A 10 10 0 0 1 -10 0"/>'
+            '</svg>'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "two-quarter-arcs.svg"
+            source.write_text(svg, encoding="utf-8")
+            preview = SvgToDxfConverter(error_slider=100).preview(source)
+
+        self.assertEqual(preview.result.arcs, 1)
+        self.assertEqual(preview.result.lines, 0)
+        self.assertEqual(preview.result.vertices, 2)
+        self.assertLess(preview.result.observed_relative_error_percent, 1e-8)
+
+    def test_collinear_native_lines_do_not_add_vertices(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg">'
+            '<path d="M 0 0 L 1 0 L 2 0 L 3 0 L 3 1"/>'
+            '</svg>'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "collinear.svg"
+            source.write_text(svg, encoding="utf-8")
+            preview = SvgToDxfConverter(error_slider=100).preview(source)
+
+        self.assertEqual(preview.result.lines, 2)
+        self.assertEqual(preview.result.vertices, 3)
+        self.assertEqual(preview.result.polylines, 1)
 
     def test_higher_error_reduces_curve_complexity(self) -> None:
         svg = (

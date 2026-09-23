@@ -207,12 +207,6 @@ def relative_error_for_slider(value: int) -> float:
     return 1e-5 * math.pow(50000.0, clamped / 100.0)
 
 
-def line_preference_for_error(relative_error: float) -> float:
-    """Favor valid straight fits gradually above ten percent local error."""
-
-    return min(1.0, max(0.0, (relative_error - 0.1) / 0.4))
-
-
 def local_curve_tolerance(point_at: PointFunction, relative_error: float) -> float:
     """Derive tolerance from a curve itself instead of the whole drawing."""
 
@@ -327,7 +321,6 @@ def arc_fit(
 def minimum_primitive_spans(
     points: list[Point],
     tolerance: float,
-    line_preference: float = 0.0,
 ) -> list[tuple[int, int, Primitive]]:
     """Minimize valid primitives over error-derived native curve boundaries."""
 
@@ -370,10 +363,9 @@ def minimum_primitive_spans(
                 if candidate is None:
                     continue
                 primitive, error = candidate
-                arc_penalty = line_preference if primitive.kind == "arc" else 0.0
                 key = (
                     tail[0] + 1,
-                    tail[1] + error / max(tolerance, EPSILON) + arc_penalty,
+                    tail[1] + error / max(tolerance, EPSILON),
                 )
                 if best_key is None or key < best_key:
                     best_key = key
@@ -403,15 +395,44 @@ def minimum_primitive_spans(
     return primitives
 
 
-def minimum_primitives(
-    points: list[Point], tolerance: float, line_preference: float = 0.0
-) -> list[Primitive]:
+def minimum_primitives(points: list[Point], tolerance: float) -> list[Primitive]:
     return [
         primitive
-        for _start, _end, primitive in minimum_primitive_spans(
-            points, tolerance, line_preference
-        )
+        for _start, _end, primitive in minimum_primitive_spans(points, tolerance)
     ]
+
+
+def merge_collinear_lines(primitives: list[Primitive], closed: bool) -> list[Primitive]:
+    """Remove vertices between consecutive lines on the same straight path."""
+
+    def merged(first: Primitive, second: Primitive) -> Primitive | None:
+        if first.kind != "line" or second.kind != "line":
+            return None
+        if not same_point(first.end, second.start, 1e-9):
+            return None
+        first_dx = first.end[0] - first.start[0]
+        first_dy = first.end[1] - first.start[1]
+        second_dx = second.end[0] - second.start[0]
+        second_dy = second.end[1] - second.start[1]
+        if first_dx * second_dx + first_dy * second_dy <= 0.0:
+            return None
+        length = distance(first.start, second.end)
+        if line_distance(first.end, first.start, second.end) > max(length, 1.0) * 1e-10:
+            return None
+        return Primitive("line", first.start, second.end, error=max(first.error, second.error))
+
+    compact: list[Primitive] = []
+    for primitive in primitives:
+        replacement = merged(compact[-1], primitive) if compact else None
+        if replacement is None:
+            compact.append(primitive)
+        else:
+            compact[-1] = replacement
+    if closed and len(compact) > 1:
+        replacement = merged(compact[-1], compact[0])
+        if replacement is not None:
+            compact = [*compact[1:-1], replacement]
+    return compact
 
 
 def closed_circle(points: list[Point], tolerance: float) -> tuple[Point, float, float] | None:
@@ -450,7 +471,6 @@ class SvgToDxfConverter:
     ) -> None:
         self.error_slider = min(100, max(0, int(error_slider)))
         self.relative_error = relative_error_for_slider(self.error_slider)
-        self.line_preference = line_preference_for_error(self.relative_error)
         self.document = None
         self.modelspace = None
         self.polylines = 0
@@ -509,6 +529,7 @@ class SvgToDxfConverter:
         )
 
     def _add_chain(self, primitives: list[Primitive], closed: bool) -> None:
+        primitives = merge_collinear_lines(primitives, closed)
         if not primitives:
             return
         vertices = [
@@ -595,20 +616,33 @@ class SvgToDxfConverter:
                     continue
 
             primitives: list[Primitive] = []
+            curved_points: list[Point] = []
+            curved_tolerances: list[float] = []
+
+            def flush_curves() -> None:
+                if not curved_points:
+                    return
+                tolerance = min(curved_tolerances)
+                fitted = minimum_primitives(curved_points, tolerance)
+                self._record_curve_error(fitted, tolerance)
+                primitives.extend(fitted)
+                curved_points.clear()
+                curved_tolerances.clear()
+
             for segment, point_at, tolerance in prepared:
                 if isinstance(segment, Line):
+                    flush_curves()
                     start = point_at(0.0)
                     end = point_at(1.0)
                     if not same_point(start, end):
                         primitives.append(Primitive("line", start, end))
                 else:
-                    fitted = minimum_primitives(
-                        native_curve_samples(point_at, tolerance),
-                        tolerance,
-                        self.line_preference,
-                    )
-                    self._record_curve_error(fitted, tolerance)
-                    primitives.extend(fitted)
+                    samples = native_curve_samples(point_at, tolerance)
+                    if curved_points and len(curved_points) + len(samples) > 128:
+                        flush_curves()
+                    append_unique(curved_points, samples)
+                    curved_tolerances.append(tolerance)
+            flush_curves()
             subpath_tolerances = [
                 tolerance
                 for _segment, _point_at, tolerance in prepared
@@ -698,7 +732,6 @@ class SvgToDxfConverter:
             fitted = minimum_primitives(
                 native_curve_samples(point_at, tolerance),
                 tolerance,
-                self.line_preference,
             )
             self._record_curve_error(fitted, tolerance)
             primitives.extend(fitted)
@@ -738,7 +771,7 @@ class SvgToDxfConverter:
                 recognized[2] / (tolerance / self.relative_error),
             )
         else:
-            fitted = minimum_primitives(points, tolerance, self.line_preference)
+            fitted = minimum_primitives(points, tolerance)
             self._record_curve_error(fitted, tolerance)
             self._add_chain(fitted, True)
 
